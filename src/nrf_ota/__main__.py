@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import sys
 
 from bleak.backends.device import BLEDevice
@@ -25,6 +26,10 @@ from ._const import DEFAULT_PRN, DeviceNotFoundError, DFUError
 from ._zip import DFUZipInfo
 from .scan import _discover_with_adv
 
+_IS_TTY: bool = sys.stdout.isatty()
+_DIM: str = "\033[2m" if _IS_TTY else ""
+_RESET: str = "\033[0m" if _IS_TTY else ""
+
 
 def _print_progress(pct: float, *, width: int = 40) -> None:
     filled = int(width * pct / 100)
@@ -32,6 +37,23 @@ def _print_progress(pct: float, *, width: int = 40) -> None:
     print(f"\r  [{bar}] {pct:5.1f}%", end="", flush=True)
     if pct >= 100:
         print()
+
+
+async def _spin(msg: str) -> None:
+    """Animate a braille spinner until cancelled. Prints the static msg on cancel."""
+    if not _IS_TTY:
+        print(msg, flush=True)
+        return
+    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    i = 0
+    try:
+        while True:
+            print(f"\r{frames[i % len(frames)]}  {msg}", end="", flush=True)
+            i += 1
+            await asyncio.sleep(0.08)
+    except asyncio.CancelledError:
+        print(f"\r{msg}", flush=True)
+        raise
 
 
 def main() -> None:
@@ -77,20 +99,32 @@ async def _async_main() -> None:
     try:
         # Pre-resolve firmware (fail fast before 5 s BLE scan)
         if not args.quiet and args.zip_path.startswith(("http://", "https://")):
-            print(f"Downloading {args.zip_path} …")
+            zip_name = args.zip_path.rsplit("/", 1)[-1] or args.zip_path
+            print(f"Downloading {zip_name} …")
         zip_info: DFUZipInfo = await _load_zip(
             args.zip_path,
             on_progress=None if args.quiet else _print_progress,
         )
         if not args.quiet:
-            ver_str = f" — v{zip_info.app_version}" if zip_info.app_version is not None else ""
-            crc_str = f" — CRC {zip_info.crc16:#06x} ✓" if zip_info.crc16 is not None else ""
-            print(f"Firmware: {zip_info.bin_file} ({len(zip_info.firmware):,} bytes){ver_str}{crc_str}")
+            meta: list[str] = []
+            if zip_info.app_version is not None:
+                meta.append(f"v{zip_info.app_version}")
+            meta.append(f"{len(zip_info.firmware):,} bytes")
+            if zip_info.crc16 is not None:
+                meta.append(f"CRC {zip_info.crc16:#06x} ✓")
+            print(f"Firmware: {zip_info.bin_file}  {_DIM}{' · '.join(meta)}{_RESET}")
 
         # Scan
+        spinner: asyncio.Task[None] | None = None
         if not args.quiet:
-            print(f"Scanning for BLE devices ({args.timeout:.0f} s)…")
+            spinner = asyncio.create_task(
+                _spin(f"Scanning for BLE devices ({args.timeout:.0f} s)…")
+            )
         raw_scan = await _discover_with_adv(args.timeout)
+        if spinner is not None:
+            spinner.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await spinner
 
         # Prefer the live advertisement name over the cached device.name so that after a
         # successful flash the device shows as "OD*" rather than the stale "AdaDFU".
@@ -104,6 +138,8 @@ async def _async_main() -> None:
             print("No named BLE devices found.", file=sys.stderr)
             sys.exit(1)
 
+        col = max(len(name) for _, name in devices) + 2
+
         # --device matching (non-interactive)
         if args.device:
             needle = args.device.strip().upper()
@@ -115,17 +151,17 @@ async def _async_main() -> None:
                 print(f"No device found matching '{args.device}'.", file=sys.stderr)
                 print("\nAvailable devices:", file=sys.stderr)
                 for dev, name in devices:
-                    print(f"  {name}  ({dev.address})", file=sys.stderr)
+                    print(f"  {name:<{col}}{dev.address}", file=sys.stderr)
                 sys.exit(1)
 
             selected, selected_name = matches[0]
             if not args.quiet:
-                print(f"Selected: {selected_name}  ({selected.address})")
+                print(f"Selected: {selected_name}  {_DIM}{selected.address}{_RESET}")
 
         else:
             print(f"\nFound {len(devices)} device(s):")
             for i, (dev, name) in enumerate(devices):
-                print(f"  [{i}] {name}  ({dev.address})")
+                print(f"  [{i}] {name:<{col}}{_DIM}{dev.address}{_RESET}")
 
             # Device picker
             selected_index: int | None = None
@@ -144,7 +180,7 @@ async def _async_main() -> None:
                     sys.exit(0)
 
             selected, selected_name = devices[selected_index]
-            print(f"\nSelected: {selected_name}  ({selected.address})")
+            print(f"\nSelected: {selected_name}  {_DIM}{selected.address}{_RESET}")
 
         # DFU
         if not args.quiet:
@@ -157,7 +193,7 @@ async def _async_main() -> None:
             packets_per_notification=args.prn,
         )
         if not args.quiet:
-            print("\nUpdate complete.")
+            print("\nDone.")
 
     except KeyboardInterrupt:
         print("\nAborted.")
