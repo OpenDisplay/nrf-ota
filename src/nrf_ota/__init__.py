@@ -20,16 +20,16 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 
-from .dfu import (
+from ._const import (
     LEGACY_DFU_SERVICE_UUID,
     TYPE_APPLICATION,
     DeviceNotFoundError,
     DFUError,
-    LegacyDFU,
     LogCallback,
     ProgressCallback,
-    parse_dfu_zip,
 )
+from ._zip import parse_dfu_zip
+from .dfu import LegacyDFU
 from .scan import _CB_MACOS, find_dfu_target, scan_for_devices, trigger_bootloader
 
 # macOS CoreBluetooth write-without-response flow control rejects firmware

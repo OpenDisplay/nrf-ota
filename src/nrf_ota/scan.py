@@ -11,7 +11,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 
-from .dfu import (
+from ._const import (
     BUTTONLESS_CP_UUID,
     LEGACY_DFU_CONTROL_POINT_UUID,
     LEGACY_DFU_SERVICE_UUID,

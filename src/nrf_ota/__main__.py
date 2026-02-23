@@ -22,7 +22,7 @@ from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 
 from . import perform_dfu
-from .dfu import DeviceNotFoundError, DFUError
+from ._const import DeviceNotFoundError, DFUError
 from .scan import _CB_MACOS
 
 
