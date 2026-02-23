@@ -18,6 +18,7 @@ from .dfu import (
     OP_START_DFU,
     TYPE_APPLICATION,
     DeviceNotFoundError,
+    DFUError,
     LogCallback,
 )
 
@@ -129,7 +130,7 @@ async def trigger_bootloader(
                         if any(x in msg for x in disconnect_indicators) or disconnected:
                             log("Reboot trigger accepted (device disconnected as expected).")
                         else:
-                            log(f"Warning during reboot trigger: {exc} — assuming success.")
+                            raise DFUError(f"Bootloader trigger failed: {exc}") from exc
                     return True
 
     log("No DFU trigger characteristic found — assuming manual reset or already in bootloader.")
@@ -165,21 +166,17 @@ async def find_dfu_target(
     log: Callable[[str], None] = on_log or (lambda _: None)
 
     # Compute the expected post-reboot MAC (Nordic increments the last byte by 1).
-    # On macOS the address is a UUID string (no colons), so MAC+1 won't match —
-    # we'll rely on the name fallback alone in that case.
+    # use_bdaddr=True ensures real MAC addresses on all platforms, so this always works.
     mac_parts = original_address.split(":")
-    if len(mac_parts) == 6:
-        new_last = (int(mac_parts[-1], 16) + 1) % 256
-        expected_mac: str | None = ":".join(mac_parts[:-1] + [f"{new_last:02X}"])
-    else:
-        expected_mac = original_address  # macOS UUID is stable across reboot; match same address
+    new_last = (int(mac_parts[-1], 16) + 1) % 256
+    expected_mac = ":".join(mac_parts[:-1] + [f"{new_last:02X}"])
 
-    deadline = asyncio.get_event_loop().time() + timeout
+    deadline = asyncio.get_running_loop().time() + timeout
     attempt = 0
-    while asyncio.get_event_loop().time() < deadline:
+    while asyncio.get_running_loop().time() < deadline:
         results = await BleakScanner.discover(timeout=2, return_adv=True, **_CB_MACOS)
         for device, adv_data in results.values():
-            mac_match = expected_mac is not None and device.address.upper() == expected_mac.upper()
+            mac_match = device.address.upper() == expected_mac.upper()
             live_name = adv_data.local_name or ""
             cached_name = device.name or ""
             name_match = "DFU" in live_name.upper() or "DFU" in cached_name.upper()

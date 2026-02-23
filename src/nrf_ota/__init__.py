@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import Callable
-from typing import Any, cast
+from typing import cast
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
@@ -30,15 +30,7 @@ from .dfu import (
     ProgressCallback,
     parse_dfu_zip,
 )
-from .scan import find_dfu_target, scan_for_devices, trigger_bootloader
-
-# On macOS, pass use_bdaddr=True to bleak's CoreBluetooth backend so it calls the
-# private retrieveAddressForPeripheral_() IOBluetooth API and returns real Bluetooth
-# MAC addresses instead of Core Bluetooth UUID identifiers.  This means app-mode
-# (AA:BB:CC:DD:EE:FF) and DFU-mode (AA:BB:CC:DD:EE:00) are treated as distinct
-# CBPeripheral objects, eliminating GATT service handle cache pollution across the
-# app→DFU reboot.  The Nordic MAC+1 discovery logic also works correctly on macOS.
-_CB_MACOS: dict[str, Any] = {"cb": {"use_bdaddr": True}} if sys.platform == "darwin" else {}
+from .scan import _CB_MACOS, find_dfu_target, scan_for_devices, trigger_bootloader
 
 # macOS CoreBluetooth write-without-response flow control rejects firmware
 # transfers at PRN≥10 (status 0x06).  PRN=8 is confirmed stable on macOS.
@@ -211,10 +203,8 @@ async def _connect_with_retry(
         for scan_try in range(10):
             found = await BleakScanner.discover(timeout=2, return_adv=True, **_CB_MACOS)
             for d, adv_data in found.values():
-                live_name = adv_data.local_name or ""
                 addr_match = d.address.upper() == address.upper()
-                name_match = "DFU" in live_name.upper() or "DFU" in (d.name or "").upper()
-                if addr_match or name_match:
+                if addr_match:
                     fresh = d
                     break
             if fresh:
@@ -253,8 +243,7 @@ async def _connect_with_retry(
             if client:
                 await _safe_disconnect(client)
             if attempt < max_attempts - 1:
-                log(f"Connection failed: {exc} (attempt {attempt + 1}/{max_attempts}) — retrying in 3 s…")
-                await asyncio.sleep(3)
+                log(f"Connection failed: {exc} (attempt {attempt + 1}/{max_attempts}) — retrying…")
                 continue
             raise DFUError(f"Failed to connect after {max_attempts} attempts: {exc}") from exc
 

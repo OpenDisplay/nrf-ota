@@ -175,6 +175,8 @@ class LegacyDFU:
     async def read_version(self) -> tuple[int, int]:
         """Read and return the DFU bootloader version as ``(major, minor)``."""
         data = await self.client.read_gatt_char(LEGACY_DFU_VERSION_UUID)
+        if len(data) < 2:
+            raise DFUError(f"DFU version characteristic too short ({len(data)} bytes)")
         version = struct.unpack("<H", bytes(data))[0]
         return (version >> 8) & 0xFF, version & 0xFF
 
@@ -297,29 +299,16 @@ class LegacyDFU:
             packet_count += 1
 
             if packet_count >= packets_per_notification:
-                try:
-                    await self._wait_for_response()
-                    packet_count = 0
-                except DFUError as exc:
-                    if "Timeout" not in str(exc):
-                        raise
+                await self._wait_for_response()
+                packet_count = 0
 
             self._on_progress(sent / total * 100)
 
-        # Await the final response after the last chunk
-        rsp: bytearray | None = None
-        try:
-            rsp = await self._wait_for_response()
-        except DFUError as exc:
-            if "Timeout" in str(exc) and packet_count == 0:
-                self._evt.clear()
-                self.last_rsp = None
-                rsp = await self._wait_for_response()
-            else:
-                raise
+        # Await the final transfer-complete notification from the bootloader
+        rsp = await self._wait_for_response()
 
-        if rsp is None or len(rsp) < 3:
-            raise DFUError(f"Invalid notification after firmware transfer: {list(rsp) if rsp else 'None'}")
+        if len(rsp) < 3:
+            raise DFUError(f"Invalid notification after firmware transfer: {list(rsp)}")
 
         # Some bootloaders send a PRN notification (0x11) before the final response
         if rsp[0] == 0x11:
