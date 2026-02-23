@@ -43,9 +43,10 @@ __version__ = "0.2.0"
 __all__ = [
     "perform_dfu",
     "scan_for_devices",
+    "parse_dfu_zip",
+    "DFUZipInfo",
     "DFUError",
     "DeviceNotFoundError",
-    "DFUZipInfo",
 ]
 
 

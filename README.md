@@ -17,12 +17,13 @@ pip install nrf-ota
 No install required — run directly with [uvx](https://docs.astral.sh/uv/):
 
 ```bash
-uvx nrf-ota firmware.zip                             # interactive device picker
-uvx nrf-ota firmware.zip --device OD216205           # select by name (non-interactive)
-uvx nrf-ota firmware.zip --device FC:06:1C:C8:DE:47  # select by address
+uvx nrf-ota firmware.zip                                  # interactive device picker
+uvx nrf-ota https://example.com/firmware.zip              # download then flash
+uvx nrf-ota firmware.zip --device OD216205                # select by name
+uvx nrf-ota firmware.zip --device FC:06:1C:C8:DE:47       # select by address
 ```
 
-Scans for nearby BLE devices, lets you pick one, and flashes the firmware. If the device is running application firmware the bootloader is triggered automatically.
+Accepts a local ZIP path or an HTTP(S) URL. Scans for nearby BLE devices, lets you pick one, and flashes the firmware. If the device is running application firmware the bootloader is triggered automatically.
 
 ## Library
 
@@ -33,12 +34,11 @@ from nrf_ota import perform_dfu, scan_for_devices
 async def main():
     devices = await scan_for_devices(timeout=5.0)
 
-    await perform_dfu(
-        "firmware.zip",
-        devices[0],
-        on_progress=lambda pct: print(f"\r{pct:.0f}%", end=""),
-        on_log=print,
-    )
+    # local file
+    await perform_dfu("firmware.zip", devices[0], on_progress=lambda pct: print(f"\r{pct:.0f}%", end=""))
+
+    # or a URL — downloads and flashes in one call
+    await perform_dfu("https://example.com/firmware.zip", devices[0])
 
 asyncio.run(main())
 ```
@@ -51,13 +51,25 @@ Performs a full OTA update — triggers the bootloader if needed, waits for the 
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `zip_path` | `str` | Path to the Nordic DFU ZIP file |
+| `zip_path` | `str \| DFUZipInfo` | Local path, HTTP(S) URL, or pre-parsed `DFUZipInfo` |
 | `device` | `BLEDevice \| str` | Device from `scan_for_devices`, or a raw Bluetooth address |
 | `on_progress` | `Callable[[float], None]` | Called with percentage (0–100) as firmware is sent |
 | `on_log` | `Callable[[str], None]` | Called with status messages |
 | `packets_per_notification` | `int` | Packets sent per receipt notification. Default: **8 on macOS**, 10 elsewhere. |
 
 Raises `DFUError` on failure, `DeviceNotFoundError` if the bootloader can't be found after reboot.
+
+### `DFUZipInfo`
+
+Named tuple returned by `parse_dfu_zip`. Can be passed directly to `perform_dfu` to skip re-parsing:
+
+```python
+from nrf_ota import perform_dfu, parse_dfu_zip
+
+info = parse_dfu_zip("firmware.zip")
+print(f"{info.bin_file}  {len(info.firmware):,} bytes")
+await perform_dfu(info, device)
+```
 
 ### `scan_for_devices(timeout=5.0) -> list[BLEDevice]`
 
