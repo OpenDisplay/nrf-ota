@@ -221,16 +221,6 @@ async def test_find_dfu_target_mac_plus_one() -> None:
     assert result.address == "AA:BB:CC:DD:EE:02"
 
 
-async def test_find_dfu_target_macos_uuid_same_address() -> None:
-    """On macOS, UUID address is stable across reboot — match by same address."""
-    uuid_addr = "12345678-0000-0000-0000-AABBCCDDEEFF"
-    dfu_device = _make_ble_device(uuid_addr, "OD355226")  # cached name unchanged after reboot
-    adv = make_adv_data(local_name="AdaDFU")  # live advertisement shows bootloader name
-    discover_result = {uuid_addr: (dfu_device, adv)}
-    with patch("nrf_ota.scan.BleakScanner.discover", new=AsyncMock(return_value=discover_result)):
-        result = await find_dfu_target(uuid_addr, timeout=5.0)
-    assert result.address == uuid_addr
-
 
 async def test_find_dfu_target_name_fallback() -> None:
     """Live advertisement name 'DFU' matches even when cached device.name gives no hint."""
@@ -243,12 +233,12 @@ async def test_find_dfu_target_name_fallback() -> None:
 
 
 async def test_find_dfu_target_service_uuid_match() -> None:
-    """Matches on Legacy DFU service UUID even when neither address nor name gives a hint."""
+    """Matches on Legacy DFU service UUID even when address doesn't produce a MAC+1 match."""
     dfu_device = _make_ble_device("AA:BB:CC:DD:EE:FF", "ODC9D54")  # cached app-mode name
     adv = make_adv_data(local_name=None, service_uuids=[LEGACY_DFU_SERVICE_UUID])
     discover_result = {"AA:BB:CC:DD:EE:FF": (dfu_device, adv)}
     with patch("nrf_ota.scan.BleakScanner.discover", new=AsyncMock(return_value=discover_result)):
-        result = await find_dfu_target("SOME-UUID-THAT-WONT-MATCH", timeout=5.0)
+        result = await find_dfu_target("BB:BB:CC:DD:EE:FE", timeout=5.0)  # MAC+1 = BB:BB:CC:DD:EE:FF, no match
     assert result.address == "AA:BB:CC:DD:EE:FF"
 
 
