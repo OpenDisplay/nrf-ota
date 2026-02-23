@@ -14,7 +14,7 @@ pip install nrf-ota
 
 ## CLI
 
-No install required — run directly with [uvx](https://docs.astral.sh/uv/):
+Run using [uvx](https://docs.astral.sh/uv/):
 
 ```bash
 uvx nrf-ota firmware.zip                                  # interactive device picker
@@ -47,7 +47,7 @@ asyncio.run(main())
 
 ### `perform_dfu(zip_path, device, *, on_progress=None, on_log=None, packets_per_notification=...)`
 
-Performs a full OTA update — triggers the bootloader if needed, waits for the device to reboot into DFU mode, transfers the firmware, and activates it.
+Performs a full OTA update, triggers the bootloader if needed, waits for the device to reboot into DFU mode, transfers the firmware, and activates it.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
