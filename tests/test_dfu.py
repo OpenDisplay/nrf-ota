@@ -364,3 +364,94 @@ async def test_perform_dfu_happy_path_simple(mock_ble_client: MagicMock) -> None
     mock_dfu.send_firmware.assert_awaited_once()
     mock_dfu.activate_and_reset.assert_awaited_once()
     assert any("DFU complete" in msg for msg in logs)
+
+
+async def test_perform_dfu_accepts_dfu_zip_info(mock_ble_client: MagicMock) -> None:
+    """perform_dfu skips _load_zip entirely when passed a DFUZipInfo directly."""
+    mock_service = MagicMock()
+    mock_service.uuid = LEGACY_DFU_SERVICE_UUID
+    mock_ble_client.services = [mock_service]
+    mock_ble_client.disconnect = AsyncMock()
+
+    mock_dfu = MagicMock()
+    mock_dfu.read_version = AsyncMock(return_value=(1, 6))
+    mock_dfu.start = AsyncMock()
+    mock_dfu.start_dfu = AsyncMock()
+    mock_dfu.init_dfu = AsyncMock()
+    mock_dfu.send_firmware = AsyncMock()
+    mock_dfu.activate_and_reset = AsyncMock()
+
+    fake_info = DFUZipInfo(
+        init_packet=b"\x01\x02",
+        firmware=b"\xAB" * 40,
+        bin_file="app.bin",
+        crc16=None,
+        app_version=1,
+    )
+    logs: list[str] = []
+
+    with patch("nrf_ota.parse_dfu_zip") as mock_parse, \
+         patch("nrf_ota.trigger_bootloader", new=AsyncMock(return_value=False)), \
+         patch("nrf_ota._connect_with_retry", new=AsyncMock(return_value=mock_ble_client)), \
+         patch("nrf_ota.LegacyDFU", return_value=mock_dfu):
+        await perform_dfu(fake_info, _make_ble_device("AA:BB:CC:DD:EE:FF", "DfuTarg"), on_log=logs.append)
+
+    mock_parse.assert_not_called()
+    mock_dfu.send_firmware.assert_awaited_once()
+
+
+async def test_perform_dfu_url_string(mock_ble_client: MagicMock) -> None:
+    """perform_dfu downloads and flashes when given an HTTPS URL."""
+    import io
+    import json
+    import zipfile
+
+    from nrf_ota._zip import crc16_ccitt
+
+    mock_service = MagicMock()
+    mock_service.uuid = LEGACY_DFU_SERVICE_UUID
+    mock_ble_client.services = [mock_service]
+    mock_ble_client.disconnect = AsyncMock()
+
+    mock_dfu = MagicMock()
+    mock_dfu.read_version = AsyncMock(return_value=(1, 6))
+    mock_dfu.start = AsyncMock()
+    mock_dfu.start_dfu = AsyncMock()
+    mock_dfu.init_dfu = AsyncMock()
+    mock_dfu.send_firmware = AsyncMock()
+    mock_dfu.activate_and_reset = AsyncMock()
+
+    firmware = b"\xde\xad" * 20
+    init_packet = b"\x00\x01\x02\x03"
+    manifest = json.dumps({
+        "manifest": {
+            "application": {
+                "bin_file": "app.bin",
+                "dat_file": "app.dat",
+                "init_packet_data": {"firmware_crc16": crc16_ccitt(firmware)},
+            }
+        }
+    })
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("manifest.json", manifest)
+        z.writestr("app.bin", firmware)
+        z.writestr("app.dat", init_packet)
+    zip_bytes = buf.getvalue()
+
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_resp.headers.get.return_value = str(len(zip_bytes))
+    mock_resp.read.side_effect = [zip_bytes, b""]
+
+    with patch("urllib.request.urlopen", return_value=mock_resp), \
+         patch("nrf_ota.trigger_bootloader", new=AsyncMock(return_value=False)), \
+         patch("nrf_ota._connect_with_retry", new=AsyncMock(return_value=mock_ble_client)), \
+         patch("nrf_ota.LegacyDFU", return_value=mock_dfu):
+        await perform_dfu(
+            "https://example.com/firmware.zip",
+            _make_ble_device("AA:BB:CC:DD:EE:FF", "DfuTarg"),
+        )
+
+    mock_dfu.send_firmware.assert_awaited_once()

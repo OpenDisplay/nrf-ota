@@ -12,6 +12,7 @@ Typical usage::
 from __future__ import annotations
 
 import asyncio
+import urllib.request
 from collections.abc import Callable
 
 from bleak import BleakClient
@@ -26,7 +27,7 @@ from ._const import (
     LogCallback,
     ProgressCallback,
 )
-from ._zip import parse_dfu_zip
+from ._zip import DFUZipInfo, _parse_zip_bytes, parse_dfu_zip
 from .dfu import LegacyDFU
 from .scan import (
     _connect_with_retry,
@@ -44,11 +45,48 @@ __all__ = [
     "scan_for_devices",
     "DFUError",
     "DeviceNotFoundError",
+    "DFUZipInfo",
 ]
 
 
+async def _load_zip(
+    source: str,
+    on_progress: ProgressCallback | None = None,
+) -> DFUZipInfo:
+    """Load a Nordic DFU ZIP from a local path or HTTP(S) URL.
+
+    For local paths, parses synchronously.  For URLs, downloads via
+    ``urllib.request`` in a thread-pool executor so the event loop is not blocked.
+    """
+    if not source.startswith(("http://", "https://")):
+        return parse_dfu_zip(source)
+
+    loop = asyncio.get_running_loop()
+
+    def _blocking() -> bytes:
+        with urllib.request.urlopen(source) as resp:  # noqa: S310
+            total_str = resp.headers.get("Content-Length")
+            total = int(total_str) if total_str else None
+            chunks: list[bytes] = []
+            downloaded = 0
+            while chunk := resp.read(65_536):
+                chunks.append(chunk)
+                downloaded += len(chunk)
+                if on_progress and total and downloaded < total:
+                    loop.call_soon_threadsafe(on_progress, downloaded / total * 100)
+            return b"".join(chunks)
+
+    try:
+        data = await loop.run_in_executor(None, _blocking)
+    except OSError as exc:
+        raise DFUError(f"Download failed: {exc}") from exc
+    if on_progress:
+        on_progress(100.0)
+    return _parse_zip_bytes(data)
+
+
 async def perform_dfu(
-    zip_path: str,
+    zip_path: str | DFUZipInfo,
     device: BLEDevice | str,
     *,
     on_progress: ProgressCallback | None = None,
@@ -61,7 +99,8 @@ async def perform_dfu(
     connection retries, and the protocol itself.
 
     Args:
-        zip_path: Path to the Nordic DFU ZIP file (contains ``.bin`` + ``.dat``).
+        zip_path: Path or HTTP(S) URL to the Nordic DFU ZIP file (contains
+            ``.bin`` + ``.dat``), or a pre-parsed :class:`DFUZipInfo`.
         device: Target device — either a :class:`bleak.BLEDevice` (as returned
             by :func:`scan_for_devices`) or a raw Bluetooth address string.
             Passing a string will trigger a scan to resolve the device first.
@@ -77,16 +116,18 @@ async def perform_dfu(
         DFUError: If any step of the DFU process fails.
         DeviceNotFoundError: If the DFU-mode bootloader cannot be found after
             triggering a reboot.
-        FileNotFoundError: If *zip_path* does not exist.
+        FileNotFoundError: If *zip_path* is a local path that does not exist.
     """
     log: Callable[[str], None] = on_log or (lambda _: None)
 
-    # 1. Parse firmware ZIP
-    info = parse_dfu_zip(zip_path)
-    init_packet, firmware = info.init_packet, info.firmware
-    ver_str = f" — v{info.app_version}" if info.app_version is not None else ""
-    crc_str = f" — CRC {info.crc16:#06x} ✓" if info.crc16 is not None else ""
-    log(f"Firmware: {info.bin_file} ({len(firmware):,} bytes){ver_str}{crc_str}")
+    # 1. Load firmware ZIP (URL or path) — or use pre-parsed DFUZipInfo directly
+    if isinstance(zip_path, DFUZipInfo):
+        info = zip_path
+    else:
+        info = await _load_zip(zip_path, on_progress=on_progress)
+        ver_str = f" — v{info.app_version}" if info.app_version is not None else ""
+        crc_str = f" — CRC {info.crc16:#06x} ✓" if info.crc16 is not None else ""
+        log(f"Firmware: {info.bin_file} ({len(info.firmware):,} bytes){ver_str}{crc_str}")
 
     # 2. Resolve address string
     ble_device: BLEDevice | None
@@ -149,9 +190,9 @@ async def perform_dfu(
         if disconnected or not client.is_connected:
             raise DFUError("Device disconnected before DFU could begin")
 
-        await dfu.start_dfu(len(firmware), TYPE_APPLICATION)
-        await dfu.init_dfu(init_packet)
-        await dfu.send_firmware(firmware, packets_per_notification=packets_per_notification)
+        await dfu.start_dfu(len(info.firmware), TYPE_APPLICATION)
+        await dfu.init_dfu(info.init_packet)
+        await dfu.send_firmware(info.firmware, packets_per_notification=packets_per_notification)
         await dfu.activate_and_reset()
 
         log("DFU complete — device is rebooting with new firmware.")
