@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0](https://github.com/OpenDisplay-org/nrf-ota/compare/v0.2.0...v0.3.0) (2026-02-23)
+
+
+### Features
+
+* allow url for downloading zip ([6451594](https://github.com/OpenDisplay-org/nrf-ota/commit/64515941c37e5961d68fb83ecb2c944f982baebf))
+* refactor ([f9d46f0](https://github.com/OpenDisplay-org/nrf-ota/commit/f9d46f056b00c1e10213f29967d28586f8eb6db4))
+* visual improvements ([def1639](https://github.com/OpenDisplay-org/nrf-ota/commit/def1639e1a651d597d1a70aa4408f7c817a9e795))
+
+
+### Documentation
+
+* update usage ([c98230f](https://github.com/OpenDisplay-org/nrf-ota/commit/c98230f2f8a9dba829ecad9774f3540d66b237d9))
+
 ## [0.2.0](https://github.com/OpenDisplay-org/nrf-ota/compare/v0.1.0...v0.2.0) (2026-02-22)
 
 
