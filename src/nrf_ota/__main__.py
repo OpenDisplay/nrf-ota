@@ -18,12 +18,11 @@ import argparse
 import asyncio
 import sys
 
-from bleak import BleakScanner
 from bleak.backends.device import BLEDevice
 
 from . import perform_dfu
-from ._const import DeviceNotFoundError, DFUError
-from .scan import _CB_MACOS
+from ._const import DEFAULT_PRN, DeviceNotFoundError, DFUError
+from .scan import _discover_with_adv
 
 
 def main() -> None:
@@ -44,13 +43,12 @@ async def _async_main() -> None:
         metavar="SECONDS",
         help="BLE scan timeout (default: 5 s)",
     )
-    _default_prn = 8 if sys.platform == "darwin" else 10
     parser.add_argument(
         "--prn",
         type=int,
-        default=_default_prn,
+        default=DEFAULT_PRN,
         metavar="N",
-        help=f"Packets per receipt notification (default: {_default_prn} on this platform).",
+        help=f"Packets per receipt notification (default: {DEFAULT_PRN} on this platform).",
     )
     parser.add_argument(
         "--device",
@@ -64,10 +62,10 @@ async def _async_main() -> None:
     )
     args = parser.parse_args()
 
-    # ── Scan ──────────────────────────────────────────────────────────────
+    # Scan
     if not args.quiet:
         print(f"Scanning for BLE devices ({args.timeout:.0f} s)…")
-    raw_scan = await BleakScanner.discover(timeout=args.timeout, return_adv=True, **_CB_MACOS)
+    raw_scan = await _discover_with_adv(args.timeout)
 
     # Prefer the live advertisement name over the cached device.name so that after a
     # successful flash the device shows as "OD*" rather than the stale "AdaDFU".
@@ -81,7 +79,7 @@ async def _async_main() -> None:
         print("No named BLE devices found.", file=sys.stderr)
         sys.exit(1)
 
-    # ── --device matching (non-interactive) ───────────────────────────────
+    # --device matching (non-interactive)
     if args.device:
         needle = args.device.strip().upper()
         matches = [
@@ -104,7 +102,7 @@ async def _async_main() -> None:
         for i, (dev, name) in enumerate(devices):
             print(f"  [{i}] {name}  ({dev.address})")
 
-        # ── Device picker ──────────────────────────────────────────────────
+        # Device picker
         selected_index: int | None = None
         while selected_index is None:
             try:
@@ -123,7 +121,7 @@ async def _async_main() -> None:
         selected, selected_name = devices[selected_index]
         print(f"\nSelected: {selected_name}  ({selected.address})")
 
-    # ── DFU ───────────────────────────────────────────────────────────────
+    # DFU
     last_pct = -1
 
     def on_progress(pct: float) -> None:

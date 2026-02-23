@@ -11,8 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from bleak.backends.scanner import AdvertisementData
 
+from nrf_ota import perform_dfu
+from nrf_ota._zip import DFUZipInfo
 from nrf_ota.dfu import LEGACY_DFU_SERVICE_UUID, DeviceNotFoundError, DFUError, LegacyDFU, parse_dfu_zip
-from nrf_ota.scan import find_dfu_target, trigger_bootloader
+from nrf_ota.scan import _connect_with_retry, find_dfu_target, trigger_bootloader
 
 
 def make_adv_data(
@@ -103,7 +105,7 @@ def test_parse_dfu_zip_missing_file() -> None:
         parse_dfu_zip("/nonexistent/path/firmware.zip")
 
 
-# ── LegacyDFU.read_version ────────────────────────────────────────────────────
+# LegacyDFU.read_version
 
 
 async def test_read_version_returns_major_minor(dfu: LegacyDFU) -> None:
@@ -113,7 +115,7 @@ async def test_read_version_returns_major_minor(dfu: LegacyDFU) -> None:
     assert minor == 6
 
 
-# ── LegacyDFU.start_dfu ───────────────────────────────────────────────────────
+# LegacyDFU.start_dfu
 
 
 async def test_start_dfu_success(dfu: LegacyDFU) -> None:
@@ -138,7 +140,7 @@ async def test_start_dfu_short_response(dfu: LegacyDFU) -> None:
         await dfu.start_dfu(image_size=256)
 
 
-# ── LegacyDFU._wait_for_response timeout ─────────────────────────────────────
+# LegacyDFU._wait_for_response timeout
 
 
 async def test_wait_for_response_timeout(dfu: LegacyDFU) -> None:
@@ -150,7 +152,7 @@ async def test_wait_for_response_timeout(dfu: LegacyDFU) -> None:
         await dfu._wait_for_response()
 
 
-# ── LegacyDFU callbacks ───────────────────────────────────────────────────────
+# LegacyDFU callbacks
 
 
 async def test_on_progress_called(dfu_zip: Path, mock_ble_client: MagicMock) -> None:
@@ -201,7 +203,7 @@ async def test_on_log_called(mock_ble_client: MagicMock) -> None:
     assert any("Sending firmware" in msg for msg in logs)
 
 
-# ── find_dfu_target ───────────────────────────────────────────────────────────
+# find_dfu_target
 
 
 def _make_ble_device(address: str, name: str | None) -> MagicMock:
@@ -242,7 +244,7 @@ async def test_find_dfu_target_service_uuid_match() -> None:
     assert result.address == "AA:BB:CC:DD:EE:FF"
 
 
-# ── trigger_bootloader ────────────────────────────────────────────────────────
+# trigger_bootloader
 
 
 async def test_trigger_bootloader_skips_when_live_name_is_dfu() -> None:
@@ -272,3 +274,93 @@ async def test_find_dfu_target_not_found() -> None:
     with patch("nrf_ota.scan.BleakScanner.discover", new=AsyncMock(return_value={})):
         with pytest.raises(DeviceNotFoundError):
             await find_dfu_target("AA:BB:CC:DD:EE:01", timeout=0.1)
+
+
+# _connect_with_retry
+
+
+async def test_connect_with_retry_success_first_attempt() -> None:
+    """Returns a connected BleakClient when device is found and connects on the first try."""
+    mock_device = _make_ble_device("AA:BB:CC:DD:EE:FF", "DfuTarg")
+    adv = make_adv_data(local_name="DfuTarg")
+    scan_result = {"AA:BB:CC:DD:EE:FF": (mock_device, adv)}
+
+    mock_client = MagicMock()
+    mock_client.connect = AsyncMock()
+    mock_client.disconnect = AsyncMock()
+    mock_client.is_connected = True
+
+    disconnect_calls: list[object] = []
+
+    with patch("nrf_ota.scan.BleakScanner.discover", new=AsyncMock(return_value=scan_result)):
+        with patch("nrf_ota.scan.BleakClient", return_value=mock_client) as mock_cls:
+            result = await _connect_with_retry(
+                "AA:BB:CC:DD:EE:FF",
+                on_disconnect_cb=disconnect_calls.append,
+            )
+
+    assert result is mock_client
+    mock_client.connect.assert_awaited_once()
+    assert mock_cls.call_count == 1
+
+
+async def test_connect_with_retry_device_not_found_raises() -> None:
+    """Raises DFUError when device never appears in scan across all attempts."""
+    disconnect_calls: list[object] = []
+
+    with patch("nrf_ota.scan.BleakScanner.discover", new=AsyncMock(return_value={})):
+        with patch("nrf_ota.scan.BleakClient") as mock_cls:
+            with pytest.raises(DFUError, match="not found after multiple scan attempts"):
+                await _connect_with_retry(
+                    "AA:BB:CC:DD:EE:FF",
+                    max_attempts=1,
+                    on_disconnect_cb=disconnect_calls.append,
+                )
+
+    mock_cls.assert_not_called()
+
+
+# perform_dfu
+
+
+async def test_perform_dfu_happy_path_simple(mock_ble_client: MagicMock) -> None:
+    """perform_dfu calls all DFU steps in order when device is already in DFU mode."""
+    mock_service = MagicMock()
+    mock_service.uuid = LEGACY_DFU_SERVICE_UUID
+    mock_ble_client.services = [mock_service]
+    mock_ble_client.disconnect = AsyncMock()
+
+    mock_dfu = MagicMock()
+    mock_dfu.read_version = AsyncMock(return_value=(1, 6))
+    mock_dfu.start = AsyncMock()
+    mock_dfu.start_dfu = AsyncMock()
+    mock_dfu.init_dfu = AsyncMock()
+    mock_dfu.send_firmware = AsyncMock()
+    mock_dfu.activate_and_reset = AsyncMock()
+
+    fake_info = DFUZipInfo(
+        init_packet=b"\x01\x02",
+        firmware=b"\xAB" * 40,
+        bin_file="app.bin",
+        crc16=None,
+        app_version=1,
+    )
+
+    logs: list[str] = []
+
+    with patch("nrf_ota.parse_dfu_zip", return_value=fake_info):
+        with patch("nrf_ota.trigger_bootloader", new=AsyncMock(return_value=False)):
+            with patch("nrf_ota._connect_with_retry", new=AsyncMock(return_value=mock_ble_client)):
+                with patch("nrf_ota.LegacyDFU", return_value=mock_dfu):
+                    await perform_dfu(
+                        "firmware.zip",
+                        _make_ble_device("AA:BB:CC:DD:EE:FF", "DfuTarg"),
+                        on_log=logs.append,
+                    )
+
+    mock_dfu.start.assert_awaited_once()
+    mock_dfu.start_dfu.assert_awaited_once()
+    mock_dfu.init_dfu.assert_awaited_once()
+    mock_dfu.send_firmware.assert_awaited_once()
+    mock_dfu.activate_and_reset.assert_awaited_once()
+    assert any("DFU complete" in msg for msg in logs)

@@ -12,11 +12,13 @@ import asyncio
 import struct
 
 from bleak import BleakClient
+from bleak.exc import BleakError
 
 # Re-export so callers that do `from nrf_ota.dfu import ...` keep working.
 from ._const import (  # noqa: F401
     BUTTONLESS_CP_UUID,
     BUTTONLESS_SERVICE_UUID,
+    DEFAULT_PRN,
     LEGACY_DFU_CONTROL_POINT_UUID,
     LEGACY_DFU_PACKET_UUID,
     LEGACY_DFU_SERVICE_UUID,
@@ -24,16 +26,21 @@ from ._const import (  # noqa: F401
     OP_ACTIVATE_N_RESET,
     OP_INIT_DFU_PARAMS,
     OP_PACKET_RECEIPT_NOTIF_REQ,
+    OP_PKT_RECEIPT_NOTIF,
     OP_RECEIVE_FW,
+    OP_RESPONSE,
     OP_START_DFU,
     OP_VALIDATE_FW,
+    RSP_INVALID_STATE,
+    RSP_OP_FAILED,
+    RSP_SUCCESS,
     TYPE_APPLICATION,
     DeviceNotFoundError,
     DFUError,
     LogCallback,
     ProgressCallback,
 )
-from ._zip import DFUZipInfo, _crc16_ccitt, parse_dfu_zip  # noqa: F401
+from ._zip import DFUZipInfo, crc16_ccitt, parse_dfu_zip  # noqa: F401
 
 
 class LegacyDFU:
@@ -60,7 +67,7 @@ class LegacyDFU:
         self._evt: asyncio.Event = asyncio.Event()
         self.last_rsp: bytearray | None = None
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # Helpers
 
     async def read_version(self) -> tuple[int, int]:
         """Read and return the DFU bootloader version as ``(major, minor)``."""
@@ -103,7 +110,7 @@ class LegacyDFU:
         self.last_rsp = None
         return rsp
 
-    # ── DFU steps ─────────────────────────────────────────────────────────────
+    # DFU steps
 
     async def start_dfu(self, image_size: int, mode: int = TYPE_APPLICATION) -> None:
         """Send the Start DFU command together with the firmware image size."""
@@ -119,7 +126,7 @@ class LegacyDFU:
         await self.client.write_gatt_char(LEGACY_DFU_PACKET_UUID, size_packet, response=False)
 
         rsp = await self._wait_for_response()
-        if len(rsp) < 3 or rsp[2] not in (0x01, 0x02):
+        if len(rsp) < 3 or rsp[2] not in (RSP_SUCCESS, RSP_INVALID_STATE):
             raise DFUError(f"Start DFU failed — response: {list(rsp)}")
 
     async def init_dfu(self, init_packet: bytes) -> None:
@@ -149,7 +156,7 @@ class LegacyDFU:
         )
 
         rsp = await self._wait_for_response()
-        if len(rsp) < 3 or rsp[2] not in (0x01, 0x02):
+        if len(rsp) < 3 or rsp[2] not in (RSP_SUCCESS, RSP_INVALID_STATE):
             raise DFUError(f"Init packet rejected — response: {list(rsp)}")
 
     async def send_firmware(self, firmware: bytes, packets_per_notification: int = 10) -> None:
@@ -200,22 +207,22 @@ class LegacyDFU:
         if len(rsp) < 3:
             raise DFUError(f"Invalid notification after firmware transfer: {list(rsp)}")
 
-        # Some bootloaders send a PRN notification (0x11) before the final response
-        if rsp[0] == 0x11:
+        # Some bootloaders send a PRN notification before the final response
+        if rsp[0] == OP_PKT_RECEIPT_NOTIF:
             self._evt.clear()
             self.last_rsp = None
             rsp = await self._wait_for_response()
-            if len(rsp) < 3 or rsp[0] != 0x10 or rsp[1] != OP_RECEIVE_FW:
+            if len(rsp) < 3 or rsp[0] != OP_RESPONSE or rsp[1] != OP_RECEIVE_FW:
                 raise DFUError(f"Unexpected response to RECEIVE_FW: {list(rsp)}")
 
-        if rsp[0] != 0x10 or rsp[1] != OP_RECEIVE_FW:
+        if rsp[0] != OP_RESPONSE or rsp[1] != OP_RECEIVE_FW:
             raise DFUError(f"Unexpected notification format after transfer: {list(rsp)}")
-        if rsp[2] == 0x06:
+        if rsp[2] == RSP_OP_FAILED:
             raise DFUError(
                 "Firmware upload failed: status 0x06 (operation failed). "
                 "On macOS try a lower --prn value (e.g. --prn 4)."
             )
-        if rsp[2] not in (0x01, 0x02):
+        if rsp[2] not in (RSP_SUCCESS, RSP_INVALID_STATE):
             raise DFUError(f"Firmware upload rejected — status {rsp[2]:#04x}")
 
         # Request on-device CRC validation
@@ -227,7 +234,7 @@ class LegacyDFU:
             response=True,
         )
         rsp = await self._wait_for_response()
-        if len(rsp) < 3 or rsp[2] not in (0x01, 0x02):
+        if len(rsp) < 3 or rsp[2] not in (RSP_SUCCESS, RSP_INVALID_STATE):
             raise DFUError(f"Firmware validation failed — response: {list(rsp)}")
 
     async def activate_and_reset(self) -> None:
@@ -241,7 +248,7 @@ class LegacyDFU:
                 response=True,
             )
             await asyncio.sleep(1.0)
-        except Exception as exc:  # noqa: BLE001
+        except (BleakError, EOFError, ConnectionError, OSError) as exc:
             msg = str(exc).lower()
             if not any(x in msg for x in ("not connected", "disconnect", "eof", "connection")):
                 self._on_log(f"Warning during activate_and_reset: {exc}")

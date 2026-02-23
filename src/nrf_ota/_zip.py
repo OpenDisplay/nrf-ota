@@ -19,7 +19,7 @@ class DFUZipInfo(NamedTuple):
     app_version: int | None  # None if sentinel 0xFFFFFFFF or absent
 
 
-def _crc16_ccitt(data: bytes) -> int:
+def crc16_ccitt(data: bytes) -> int:
     """CRC-16/CCITT-FALSE — the variant Nordic uses in DFU manifest init_packet_data."""
     crc = 0xFFFF
     for byte in data:
@@ -74,7 +74,7 @@ def parse_dfu_zip(path: str) -> DFUZipInfo:
             ipd = app.get("init_packet_data", {})
             crc_expected: int | None = ipd.get("firmware_crc16")
             if crc_expected is not None:
-                crc_computed = _crc16_ccitt(firmware)
+                crc_computed = crc16_ccitt(firmware)
                 if crc_computed != crc_expected:
                     raise DFUError(
                         f"Firmware CRC mismatch: expected {crc_expected:#06x}, "

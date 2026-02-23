@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from bleak import BleakClient
 
-from nrf_ota.dfu import LegacyDFU, _crc16_ccitt
+from nrf_ota._zip import crc16_ccitt
+from nrf_ota.dfu import LegacyDFU
 
 _FIRMWARE = b"\xde\xad\xbe\xef" * 64
 _INIT_PACKET = b"\x01\x02\x03\x04"
@@ -25,7 +26,7 @@ def dfu_zip(tmp_path: Path) -> Path:
             "application": {
                 "bin_file": "application.bin",
                 "dat_file": "application.dat",
-                "init_packet_data": {"firmware_crc16": _crc16_ccitt(_FIRMWARE)},
+                "init_packet_data": {"firmware_crc16": crc16_ccitt(_FIRMWARE)},
             }
         }
     })

@@ -12,15 +12,13 @@ Typical usage::
 from __future__ import annotations
 
 import asyncio
-import sys
 from collections.abc import Callable
-from typing import cast
 
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 from bleak.backends.device import BLEDevice
-from bleak.exc import BleakError
 
 from ._const import (
+    DEFAULT_PRN,
     LEGACY_DFU_SERVICE_UUID,
     TYPE_APPLICATION,
     DeviceNotFoundError,
@@ -30,11 +28,14 @@ from ._const import (
 )
 from ._zip import parse_dfu_zip
 from .dfu import LegacyDFU
-from .scan import _CB_MACOS, find_dfu_target, scan_for_devices, trigger_bootloader
-
-# macOS CoreBluetooth write-without-response flow control rejects firmware
-# transfers at PRN≥10 (status 0x06).  PRN=8 is confirmed stable on macOS.
-_DEFAULT_PRN: int = 8 if sys.platform == "darwin" else 10
+from .scan import (
+    _connect_with_retry,
+    _resolve_address,
+    _safe_disconnect,
+    find_dfu_target,
+    scan_for_devices,
+    trigger_bootloader,
+)
 
 __version__ = "0.2.0"
 
@@ -52,7 +53,7 @@ async def perform_dfu(
     *,
     on_progress: ProgressCallback | None = None,
     on_log: LogCallback | None = None,
-    packets_per_notification: int = _DEFAULT_PRN,
+    packets_per_notification: int = DEFAULT_PRN,
 ) -> None:
     """Perform a Nordic Legacy DFU firmware update over BLE.
 
@@ -80,14 +81,14 @@ async def perform_dfu(
     """
     log: Callable[[str], None] = on_log or (lambda _: None)
 
-    # ── 1. Parse firmware ZIP ──────────────────────────────────────────────
+    # 1. Parse firmware ZIP
     info = parse_dfu_zip(zip_path)
     init_packet, firmware = info.init_packet, info.firmware
     ver_str = f" — v{info.app_version}" if info.app_version is not None else ""
     crc_str = f" — CRC {info.crc16:#06x} ✓" if info.crc16 is not None else ""
     log(f"Firmware: {info.bin_file} ({len(firmware):,} bytes){ver_str}{crc_str}")
 
-    # ── 2. Resolve address string → BLEDevice ─────────────────────────────
+    # 2. Resolve address string
     ble_device: BLEDevice | None
     original_address: str
 
@@ -99,7 +100,7 @@ async def perform_dfu(
         ble_device = device
         original_address = device.address
 
-    # ── 3. Trigger bootloader if in application mode ───────────────────────
+    # 3. Trigger the bootloader if in application mode
     needs_reboot = await trigger_bootloader(ble_device, on_log=log)
 
     dfu_device: BLEDevice
@@ -111,7 +112,7 @@ async def perform_dfu(
     else:
         dfu_device = ble_device
 
-    # ── 4. Connect (with retries + fresh scan each attempt) ───────────────
+    # 4. Connect (with retries + fresh scan each attempt)
     log(f"Connecting to {dfu_device.name or 'DFU target'} ({dfu_device.address})…")
     disconnected = False
 
@@ -125,7 +126,7 @@ async def perform_dfu(
         on_log=log,
     )
 
-    # ── 5. Run DFU protocol ────────────────────────────────────────────────
+    # 5. Run DFU protocol
     try:
         dfu_service_present = any(
             str(svc.uuid).lower() == LEGACY_DFU_SERVICE_UUID.lower()
@@ -159,99 +160,3 @@ async def perform_dfu(
     except Exception:
         await _safe_disconnect(client)
         raise
-
-
-# ── Internal helpers ──────────────────────────────────────────────────────────
-
-
-async def _resolve_address(address: str, on_log: LogCallback | None = None) -> BLEDevice:
-    """Scan and return the first device matching *address*."""
-    log: Callable[[str], None] = on_log or (lambda _: None)
-    for attempt in range(5):
-        if attempt > 0:
-            await asyncio.sleep(1.0)
-        devices = await BleakScanner.discover(timeout=3, **_CB_MACOS)
-        for d in devices:
-            if cast(BLEDevice, d).address.upper() == address.upper():
-                return cast(BLEDevice, d)
-        log(f"Device not found in scan (attempt {attempt + 1}/5)…")
-    raise DeviceNotFoundError(f"Could not locate device with address {address}")
-
-
-async def _connect_with_retry(
-    address: str,
-    *,
-    max_attempts: int = 5,
-    on_disconnect_cb: Callable[[BleakClient], None],
-    on_log: LogCallback | None = None,
-) -> BleakClient:
-    """Scan for a fresh BLEDevice handle then connect, retrying on failure.
-
-    Bleak caches BLEDevice objects internally; after a bootloader reboot the
-    cached object is stale.  Re-scanning before each connect attempt ensures
-    we always hand Bleak a live advertisement.
-    """
-    log: Callable[[str], None] = on_log or (lambda _: None)
-
-    for attempt in range(max_attempts):
-        if attempt > 0:
-            await asyncio.sleep(1.5)
-
-        # Get a fresh BLEDevice from a new scan (return_adv=True gives live advertisement
-        # data so the name check isn't fooled by macOS Core Bluetooth's cached GAP name).
-        fresh: BLEDevice | None = None
-        for scan_try in range(10):
-            found = await BleakScanner.discover(timeout=2, return_adv=True, **_CB_MACOS)
-            for d, adv_data in found.values():
-                addr_match = d.address.upper() == address.upper()
-                if addr_match:
-                    fresh = d
-                    break
-            if fresh:
-                break
-            if scan_try < 9:
-                await asyncio.sleep(0.5)
-
-        if fresh is None:
-            if attempt < max_attempts - 1:
-                log(f"Device not visible in scan (attempt {attempt + 1}/{max_attempts}) — retrying…")
-                continue
-            raise DFUError("Device not found after multiple scan attempts")
-
-        client: BleakClient | None = None
-        disconnected_early = False
-
-        def _disc(c: BleakClient) -> None:
-            nonlocal disconnected_early
-            disconnected_early = True
-            on_disconnect_cb(c)
-
-        try:
-            client = BleakClient(fresh, disconnected_callback=_disc)
-            await client.connect(timeout=30.0)
-
-            if disconnected_early or not client.is_connected:
-                await _safe_disconnect(client)
-                if attempt < max_attempts - 1:
-                    log(f"Disconnected immediately after connect (attempt {attempt + 1}/{max_attempts}) — retrying…")
-                    continue
-                raise DFUError("Device keeps disconnecting immediately after connecting")
-
-            return client
-
-        except (TimeoutError, BleakError) as exc:
-            if client:
-                await _safe_disconnect(client)
-            if attempt < max_attempts - 1:
-                log(f"Connection failed: {exc} (attempt {attempt + 1}/{max_attempts}) — retrying…")
-                continue
-            raise DFUError(f"Failed to connect after {max_attempts} attempts: {exc}") from exc
-
-    raise DFUError("Exhausted connection attempts")  # unreachable, but satisfies mypy
-
-
-async def _safe_disconnect(client: BleakClient) -> None:
-    try:
-        await client.disconnect()
-    except Exception:  # noqa: BLE001
-        pass
