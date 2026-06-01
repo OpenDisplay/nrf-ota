@@ -208,7 +208,14 @@ class LegacyDFU:
             sent += len(chunk)
             packet_count += 1
 
-            if packet_count >= packets_per_notification:
+            if sent >= total:
+                # Final packet: never wait for an in-loop receipt here. When the
+                # image completes on a PRN boundary the bootloader answers with the
+                # transfer-complete response (not a packet receipt); the post-loop
+                # _wait_for_response() below must be the one to consume it, else it
+                # would be swallowed here and the final wait would hang.
+                pass
+            elif packet_count >= packets_per_notification:
                 # The receipt round-trip itself paces the sender at the batch
                 # boundary; only pace between packets *within* a batch.
                 await self._wait_for_response()

@@ -237,7 +237,7 @@ async def test_send_firmware_paces_within_batch_when_delay_set(mock_ble_client: 
         await instance.send_firmware(b"\xAA" * 100, inter_packet_delay=0.02)  # 5 packets < PRN
 
     paced = [c for c in spy.await_args_list if c.args and c.args[0] == 0.02]
-    assert len(paced) == 5  # one pace per within-batch packet
+    assert len(paced) == 4  # 5 packets, paced between each except the final one
 
 
 async def test_send_firmware_does_not_pace_by_default(mock_ble_client: MagicMock) -> None:
@@ -250,6 +250,18 @@ async def test_send_firmware_does_not_pace_by_default(mock_ble_client: MagicMock
         await instance.send_firmware(b"\xAA" * 100)
 
     assert spy.await_count == 0
+
+
+async def test_send_firmware_final_packet_on_prn_boundary(mock_ble_client: MagicMock) -> None:
+    """Image ending exactly on a PRN boundary: the bootloader's transfer-complete
+    response must be consumed by the post-loop wait, not the in-loop receipt wait.
+    Regression — the in-loop wait used to swallow it and the final wait then hung."""
+    instance = LegacyDFU(mock_ble_client)
+    instance._response_timeout = 1.0  # fail fast instead of 30s if regressed
+    mock_ble_client.write_gatt_char = _autorespond(instance, total=200)
+
+    # 200 bytes = exactly 10 × 20-byte packets = PRN(10) boundary. Must not hang.
+    await instance.send_firmware(b"\xAA" * 200)
 
 
 # find_dfu_target
