@@ -159,7 +159,12 @@ class LegacyDFU:
         if len(rsp) < 3 or rsp[2] not in (RSP_SUCCESS, RSP_INVALID_STATE):
             raise DFUError(f"Init packet rejected — response: {list(rsp)}")
 
-    async def send_firmware(self, firmware: bytes, packets_per_notification: int = 10) -> None:
+    async def send_firmware(
+        self,
+        firmware: bytes,
+        packets_per_notification: int = 10,
+        inter_packet_delay: float = 0.0,
+    ) -> None:
         """Transfer the full firmware image and request on-device validation.
 
         Args:
@@ -167,6 +172,14 @@ class LegacyDFU:
             packets_per_notification: How many 20-byte BLE packets to send
                 before expecting a receipt notification.  Higher values are
                 faster but leave less headroom for flow control.
+            inter_packet_delay: Seconds to pause after each 20-byte data packet.
+                The DFU Packet characteristic is write-without-response, which has
+                no backpressure over an ESPHome Bluetooth proxy: bursting packets
+                overruns the proxy and they are silently dropped, so the bootloader
+                never reaches the next receipt and the transfer stalls. A small
+                delay (e.g. ``0.02``) paces the writes to roughly one per
+                connection interval, mirroring :meth:`init_dfu`. Leave ``0.0`` on a
+                direct connection, which has proper flow control.
         """
         self._on_log(f"Sending firmware ({len(firmware):,} bytes)…")
         self._evt.clear()
@@ -196,8 +209,12 @@ class LegacyDFU:
             packet_count += 1
 
             if packet_count >= packets_per_notification:
+                # The receipt round-trip itself paces the sender at the batch
+                # boundary; only pace between packets *within* a batch.
                 await self._wait_for_response()
                 packet_count = 0
+            elif inter_packet_delay > 0:
+                await asyncio.sleep(inter_packet_delay)
 
             self._on_progress(sent / total * 100)
 

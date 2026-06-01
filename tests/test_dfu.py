@@ -203,6 +203,55 @@ async def test_on_log_called(mock_ble_client: MagicMock) -> None:
     assert any("Sending firmware" in msg for msg in logs)
 
 
+def _autorespond(instance: LegacyDFU, total: int) -> AsyncMock:
+    """A write_gatt_char mock that fires the bootloader notifications the protocol
+    expects: a transfer-complete once all firmware bytes are written, and a
+    validate response when VALIDATE_FW is sent. Deterministic — no timers."""
+    from nrf_ota._const import (
+        LEGACY_DFU_CONTROL_POINT_UUID,
+        LEGACY_DFU_PACKET_UUID,
+        OP_VALIDATE_FW,
+    )
+
+    state = {"bytes": 0}
+
+    async def on_write(uuid: str, data: bytes, response: bool = False) -> None:
+        if uuid == LEGACY_DFU_PACKET_UUID:
+            state["bytes"] += len(data)
+            if state["bytes"] >= total:
+                instance._on_notify(None, bytearray(b"\x10\x03\x01"))  # transfer complete
+        elif uuid == LEGACY_DFU_CONTROL_POINT_UUID and bytes(data)[:1] == bytes([OP_VALIDATE_FW]):
+            instance._on_notify(None, bytearray(b"\x10\x04\x01"))  # validate OK
+
+    return AsyncMock(side_effect=on_write)
+
+
+async def test_send_firmware_paces_within_batch_when_delay_set(mock_ble_client: MagicMock) -> None:
+    """inter_packet_delay paces each within-batch data packet so write-without-
+    response survives an ESPHome proxy (the burst that init_dfu avoids and
+    send_firmware previously did not)."""
+    instance = LegacyDFU(mock_ble_client)
+    mock_ble_client.write_gatt_char = _autorespond(instance, total=100)
+
+    with patch("nrf_ota.dfu.asyncio.sleep", new=AsyncMock()) as spy:
+        await instance.send_firmware(b"\xAA" * 100, inter_packet_delay=0.02)  # 5 packets < PRN
+
+    paced = [c for c in spy.await_args_list if c.args and c.args[0] == 0.02]
+    assert len(paced) == 5  # one pace per within-batch packet
+
+
+async def test_send_firmware_does_not_pace_by_default(mock_ble_client: MagicMock) -> None:
+    """Default (inter_packet_delay=0.0) keeps the fast direct-connection behaviour
+    — no per-packet sleeps."""
+    instance = LegacyDFU(mock_ble_client)
+    mock_ble_client.write_gatt_char = _autorespond(instance, total=100)
+
+    with patch("nrf_ota.dfu.asyncio.sleep", new=AsyncMock()) as spy:
+        await instance.send_firmware(b"\xAA" * 100)
+
+    assert spy.await_count == 0
+
+
 # find_dfu_target
 
 
