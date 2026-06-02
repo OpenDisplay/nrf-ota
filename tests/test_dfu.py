@@ -264,6 +264,59 @@ async def test_send_firmware_final_packet_on_prn_boundary(mock_ble_client: Magic
     await instance.send_firmware(b"\xAA" * 200)
 
 
+def _autorespond_with_receipts(instance, total, prn, drop_after=None):
+    """write_gatt_char mock that fires a PRN receipt (reporting cumulative bytes
+    received) every `prn` packets, plus the transfer-complete and validate
+    responses. If drop_after is set, the device under-reports by one packet once
+    that many bytes have been sent — simulating a silently dropped packet."""
+    import struct as _struct
+
+    from nrf_ota._const import (
+        LEGACY_DFU_CONTROL_POINT_UUID,
+        LEGACY_DFU_PACKET_UUID,
+        OP_PKT_RECEIPT_NOTIF,
+        OP_VALIDATE_FW,
+    )
+
+    st = {"sent": 0, "pkts": 0}
+
+    async def on_write(uuid, data, response=False):  # noqa: ARG001
+        if uuid == LEGACY_DFU_PACKET_UUID:
+            st["sent"] += len(data)
+            st["pkts"] += 1
+            received = st["sent"] - 20 if drop_after is not None and st["sent"] > drop_after else st["sent"]
+            if st["sent"] >= total:
+                instance._on_notify(None, bytearray(b"\x10\x03\x01"))  # transfer complete
+            elif st["pkts"] % prn == 0:
+                instance._on_notify(None, bytearray([OP_PKT_RECEIPT_NOTIF]) + _struct.pack("<I", received))
+        elif uuid == LEGACY_DFU_CONTROL_POINT_UUID and bytes(data)[:1] == bytes([OP_VALIDATE_FW]):
+            instance._on_notify(None, bytearray(b"\x10\x04\x01"))
+
+    return AsyncMock(side_effect=on_write)
+
+
+async def test_send_firmware_accepts_matching_receipts(mock_ble_client: MagicMock) -> None:
+    """A PRN receipt whose byte count matches what was sent passes through."""
+    instance = LegacyDFU(mock_ble_client)
+    instance._response_timeout = 1.0
+    total = 20 * 25  # 25 packets, PRN 10 -> receipts at 10 and 20
+    mock_ble_client.write_gatt_char = _autorespond_with_receipts(instance, total, prn=10)
+    with patch("nrf_ota.dfu.asyncio.sleep", new=AsyncMock()):
+        await instance.send_firmware(b"\xAA" * total)  # default PRN=10
+
+
+async def test_send_firmware_detects_dropped_packet(mock_ble_client: MagicMock) -> None:
+    """A receipt reporting fewer bytes than sent (a dropped write-without-response
+    packet) fails fast with a clear DFUError instead of corrupting the image."""
+    instance = LegacyDFU(mock_ble_client)
+    instance._response_timeout = 1.0
+    total = 20 * 25
+    mock_ble_client.write_gatt_char = _autorespond_with_receipts(instance, total, prn=10, drop_after=150)
+    with patch("nrf_ota.dfu.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(DFUError, match="Dropped packet"):
+            await instance.send_firmware(b"\xAA" * total)
+
+
 # find_dfu_target
 
 

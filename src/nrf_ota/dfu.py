@@ -217,8 +217,23 @@ class LegacyDFU:
                 pass
             elif packet_count >= packets_per_notification:
                 # The receipt round-trip itself paces the sender at the batch
-                # boundary; only pace between packets *within* a batch.
-                await self._wait_for_response()
+                # boundary; only pace between packets *within* a batch. The receipt
+                # reports how many bytes the bootloader has actually received — if
+                # that lags what we sent, a write-without-response packet was
+                # silently dropped in transit (e.g. an overrun Bluetooth proxy).
+                # Legacy DFU cannot retransmit, so fail fast with the offset rather
+                # than letting a corrupt image pass to validate/activate and leave
+                # the device stuck in DFU with no clear cause.
+                rsp = await self._wait_for_response()
+                if rsp and rsp[0] == OP_PKT_RECEIPT_NOTIF and len(rsp) >= 5:
+                    received = struct.unpack("<I", rsp[1:5])[0]
+                    if received != sent:
+                        raise DFUError(
+                            f"Dropped packet: bootloader acknowledged {received} of {sent} bytes "
+                            f"({sent - received} B lost in transit). The link (likely a Bluetooth "
+                            "proxy) dropped a write-without-response packet; Legacy DFU cannot "
+                            "recover. Retry the update."
+                        )
                 packet_count = 0
             elif inter_packet_delay > 0:
                 await asyncio.sleep(inter_packet_delay)
