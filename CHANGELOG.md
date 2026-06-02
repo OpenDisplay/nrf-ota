@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/OpenDisplay/nrf-ota/compare/v0.3.0...v0.4.0) (2026-06-02)
+
+
+### Features
+
+* pace firmware packets for ESPHome proxy reliability ([c68b433](https://github.com/OpenDisplay/nrf-ota/commit/c68b4330a81b8360a7710effbd490e14c1e8b334))
+* verify PRN receipt offset to detect dropped packets ([93d0c4d](https://github.com/OpenDisplay/nrf-ota/commit/93d0c4d1276621bb058233bccef4cae8c828c69d))
+
+
+### Bug Fixes
+
+* don't swallow the transfer-complete response on a PRN boundary ([0d8d978](https://github.com/OpenDisplay/nrf-ota/commit/0d8d97841505447e26c5e966c07ef143b72bb128))
+* treat validate INVALID_STATE as an incomplete image, not success ([19ca56c](https://github.com/OpenDisplay/nrf-ota/commit/19ca56cc8e6d56bb35a0ea0b6a7c604d10f4d50c))
+
 ## [0.3.0](https://github.com/OpenDisplay-org/nrf-ota/compare/v0.2.0...v0.3.0) (2026-02-23)
 
 
