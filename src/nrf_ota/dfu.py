@@ -263,6 +263,7 @@ class LegacyDFU:
             )
         if rsp[2] not in (RSP_SUCCESS, RSP_INVALID_STATE):
             raise DFUError(f"Firmware upload rejected — status {rsp[2]:#04x}")
+        self._on_log(f"Transfer-complete response: {list(rsp)}")
 
         # Request on-device CRC validation
         self._evt.clear()
@@ -273,7 +274,23 @@ class LegacyDFU:
             response=True,
         )
         rsp = await self._wait_for_response()
-        if len(rsp) < 3 or rsp[2] not in (RSP_SUCCESS, RSP_INVALID_STATE):
+        self._on_log(f"Validate response: {list(rsp)}")
+        if len(rsp) < 3:
+            raise DFUError(f"Invalid validation response: {list(rsp)}")
+        if rsp[2] == RSP_INVALID_STATE:
+            # For this Legacy bootloader, dfu_image_validate() returns INVALID_STATE
+            # (0x02) exactly when m_data_received != m_image_size — the device got
+            # the wrong number of bytes (a data packet was dropped in transit). It
+            # is NOT an "alternate success": accepting it fires Activate into a
+            # device that isn't in WAIT_4_ACTIVATE, which resets WITHOUT writing the
+            # valid-app settings and leaves the device stuck in DFU. Legacy DFU
+            # cannot retransmit, so surface it as a clear, retryable failure.
+            raise DFUError(
+                "Validation failed: the bootloader received an incomplete image "
+                "(INVALID_STATE — byte-count mismatch); a data packet was dropped in "
+                "transit. Legacy DFU cannot retransmit — retry the update."
+            )
+        if rsp[2] != RSP_SUCCESS:
             raise DFUError(f"Firmware validation failed — response: {list(rsp)}")
 
     async def activate_and_reset(self) -> None:

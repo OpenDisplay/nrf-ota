@@ -203,10 +203,11 @@ async def test_on_log_called(mock_ble_client: MagicMock) -> None:
     assert any("Sending firmware" in msg for msg in logs)
 
 
-def _autorespond(instance: LegacyDFU, total: int) -> AsyncMock:
+def _autorespond(instance: LegacyDFU, total: int, validate_status: int = 0x01) -> AsyncMock:
     """A write_gatt_char mock that fires the bootloader notifications the protocol
     expects: a transfer-complete once all firmware bytes are written, and a
-    validate response when VALIDATE_FW is sent. Deterministic — no timers."""
+    validate response (status `validate_status`) when VALIDATE_FW is sent.
+    Deterministic — no timers."""
     from nrf_ota._const import (
         LEGACY_DFU_CONTROL_POINT_UUID,
         LEGACY_DFU_PACKET_UUID,
@@ -221,9 +222,20 @@ def _autorespond(instance: LegacyDFU, total: int) -> AsyncMock:
             if state["bytes"] >= total:
                 instance._on_notify(None, bytearray(b"\x10\x03\x01"))  # transfer complete
         elif uuid == LEGACY_DFU_CONTROL_POINT_UUID and bytes(data)[:1] == bytes([OP_VALIDATE_FW]):
-            instance._on_notify(None, bytearray(b"\x10\x04\x01"))  # validate OK
+            instance._on_notify(None, bytearray([0x10, 0x04, validate_status]))  # validate response
 
     return AsyncMock(side_effect=on_write)
+
+
+async def test_send_firmware_rejects_validate_invalid_state(mock_ble_client: MagicMock) -> None:
+    """validate returning INVALID_STATE (0x02) means the device received an
+    incomplete image — it must raise (not be accepted as success and activated)."""
+    instance = LegacyDFU(mock_ble_client)
+    instance._response_timeout = 1.0
+    mock_ble_client.write_gatt_char = _autorespond(instance, total=200, validate_status=0x02)
+    with patch("nrf_ota.dfu.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(DFUError, match="incomplete image"):
+            await instance.send_firmware(b"\xAA" * 200)
 
 
 async def test_send_firmware_paces_within_batch_when_delay_set(mock_ble_client: MagicMock) -> None:

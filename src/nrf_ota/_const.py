@@ -32,7 +32,7 @@ OP_PKT_RECEIPT_NOTIF: int = 0x11  # CP notification: PRN receipt
 # Response status codes
 
 RSP_SUCCESS: int = 0x01
-RSP_INVALID_STATE: int = 0x02    # some bootloaders send this as an alternate success
+RSP_INVALID_STATE: int = 0x02    # from validate = m_data_received != m_image_size (incomplete image); NOT a success
 RSP_OP_FAILED: int = 0x06        # firmware upload failed (e.g., macOS flow control)
 
 TYPE_APPLICATION: int = 0x04
