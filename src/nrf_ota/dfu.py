@@ -294,17 +294,45 @@ class LegacyDFU:
             raise DFUError(f"Firmware validation failed — response: {list(rsp)}")
 
     async def activate_and_reset(self) -> None:
-        """Send Activate + Reset.  A disconnect at this point is expected."""
+        """Send Activate + Reset.  A disconnect at this point is expected.
+
+        The DFU Control Point is write-with-response only, so over a Bluetooth
+        proxy this write often errors: the bootloader closes the link instead of
+        sending a write-response, and the proxy surfaces that as a GATT error.
+        The device only commits the valid-app settings if it actually processed
+        this write while in WAIT_4_ACTIVATE. We instrument the connection state
+        around it and, if the link *survives* the error (so the device may not
+        have processed it), retry on the SAME connection — the only state in which
+        a re-sent activate can still land (a reconnect resets the bootloader).
+        """
         self._evt.clear()
         self.last_rsp = None
-        try:
-            await self.client.write_gatt_char(
-                LEGACY_DFU_CONTROL_POINT_UUID,
-                bytes([OP_ACTIVATE_N_RESET]),
-                response=True,
-            )
-            await asyncio.sleep(1.0)
-        except (BleakError, EOFError, ConnectionError, OSError) as exc:
-            msg = str(exc).lower()
-            if not any(x in msg for x in ("not connected", "disconnect", "eof", "connection")):
-                self._on_log(f"Warning during activate_and_reset: {exc}")
+        for attempt in range(1, 5):
+            if not self.client.is_connected:
+                # Link already gone: either the device committed + reset (success)
+                # or it died before delivery. Nothing more can be sent here.
+                self._on_log(f"activate: link down before attempt {attempt} (is_connected=False)")
+                return
+            try:
+                await self.client.write_gatt_char(
+                    LEGACY_DFU_CONTROL_POINT_UUID,
+                    bytes([OP_ACTIVATE_N_RESET]),
+                    response=True,
+                )
+                await asyncio.sleep(1.0)
+                self._on_log(f"activate attempt {attempt}: write OK; is_connected={self.client.is_connected}")
+                return
+            except (BleakError, EOFError, ConnectionError, OSError) as exc:
+                still = self.client.is_connected
+                self._on_log(
+                    f"activate attempt {attempt}: write raised ({type(exc).__name__}: {exc}); "
+                    f"is_connected={still}"
+                )
+                if not still:
+                    # Device dropped the link in response to the write — the
+                    # expected committed-activate signature. Done.
+                    return
+                # Link survived → the write likely did not reach/commit; retry it
+                # on the same connection (device is still in WAIT_4_ACTIVATE).
+                await asyncio.sleep(0.5)
+        self._on_log("activate: exhausted retries with link still up — activate did not land")
