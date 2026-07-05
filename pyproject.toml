@@ -53,7 +53,6 @@ packages = ["src/nrf_ota"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-exclude = ["ota_POC.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
