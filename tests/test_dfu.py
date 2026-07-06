@@ -350,14 +350,16 @@ async def test_find_dfu_target_mac_plus_one() -> None:
 
 
 
-async def test_find_dfu_target_name_fallback() -> None:
-    """Live advertisement name 'DFU' matches even when cached device.name gives no hint."""
-    dfu_device = _make_ble_device("AA:BB:CC:DD:EE:FF", "ODC9D54")  # stale cached name
-    adv = make_adv_data(local_name="DfuTarg")  # live advertisement says DFU
-    discover_result = {"AA:BB:CC:DD:EE:FF": (dfu_device, adv)}
+async def test_find_dfu_target_ignores_name_only_match() -> None:
+    """A device advertising a DFU-ish name but neither the MAC+1 address nor the Nordic
+    DFU service UUID must NOT be selected — it could be another tag in bootloader mode or
+    a third-party DfuTarg, and flashing it would be wrong."""
+    other = _make_ble_device("11:22:33:44:55:66", "DfuTarg")  # unrelated device
+    adv = make_adv_data(local_name="DfuTarg")  # name says DFU, but no service UUID
+    discover_result = {"11:22:33:44:55:66": (other, adv)}
     with patch("nrf_ota.scan.BleakScanner.discover", new=AsyncMock(return_value=discover_result)):
-        result = await find_dfu_target("AA:BB:CC:DD:EE:00", timeout=5.0)  # MAC doesn't match
-    assert result.address == "AA:BB:CC:DD:EE:FF"
+        with pytest.raises(DeviceNotFoundError):
+            await find_dfu_target("AA:BB:CC:DD:EE:00", timeout=0.1)  # MAC+1 doesn't match
 
 
 async def test_find_dfu_target_service_uuid_match() -> None:
