@@ -273,7 +273,11 @@ async def find_dfu_target(
     """
     log: Callable[[str], None] = on_log or (lambda _: None)
 
-    # Compute the expected post-reboot MAC (Nordic increments the last byte by 1).
+    # Compute the expected post-reboot MAC.  Nordic bootloaders do a uint8 increment of
+    # addr[0] — the last byte in MAC-string order — which wraps at 0xFF with NO carry into
+    # the next byte (e.g. AA:BB:CC:DD:EE:FF → AA:BB:CC:DD:EE:00).  This is the documented
+    # Nordic-reference convention; the py-opendisplay companion aligns its MAC+1 logic to
+    # match this repo's no-carry behaviour.
     mac_parts = original_address.split(":")
     new_last = (int(mac_parts[-1], 16) + 1) % 256
     expected_mac = ":".join(mac_parts[:-1] + [f"{new_last:02X}"])
@@ -283,14 +287,19 @@ async def find_dfu_target(
     while asyncio.get_running_loop().time() < deadline:
         results = await BleakScanner.discover(timeout=2, return_adv=True, **_CB_MACOS)
         for device, adv_data in results.values():
+            # Primary discriminator: the deterministic MAC+1 address computed above.
             mac_match = device.address.upper() == expected_mac.upper()
-            live_name = adv_data.local_name or ""
-            cached_name = device.name or ""
-            dfu_match = (
-                _is_dfu_advertisement(live_name, adv_data.service_uuids or [])
-                or _is_dfu_advertisement(cached_name)
+            # Fallback for bootloaders that don't keep the MAC+1 address: require the
+            # Nordic Legacy DFU service UUID in the advertisement.  A name that merely
+            # contains "DFU" is deliberately NOT sufficient on its own — several tags in
+            # bootloader mode all advertise as "DfuTarg", so a name-only match could pick
+            # (and flash) the wrong device.  The service UUID is a specific Nordic DFU
+            # signal that Legacy bootloaders always advertise.
+            uuid_match = any(
+                LEGACY_DFU_SERVICE_UUID.lower() in s.lower()
+                for s in (adv_data.service_uuids or [])
             )
-            if mac_match or dfu_match:
+            if mac_match or uuid_match:
                 return device
         attempt += 1
         log(f"Scan {attempt}: DFU target not found yet, retrying…")
