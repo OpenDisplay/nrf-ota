@@ -26,6 +26,8 @@ Findings from testing in October 2026, and the reasoning behind `nrf_ota.esphome
 3. **Setup flakiness.** Connecting to the app through the proxy often fails with GATT error 133. Most runs needed at least one retry, so callers need connect retries.
 4. **The proxy can wedge.** After hours of use the proxy refused every connection (error 133 or timeouts, with free slots shown as 3/3) until it was power-cycled.
 
+5. **Congestion reports aren't failures.** When another connection shares the proxy (in the test, HA's OpenDisplay integration talking to a second tag), the proxy answers some packets with GATT error 143 (`ESP_GATT_CONGESTED`). For a write-without-response, ESP-IDF's Bluedroid hands the packet to L2CAP and *then* reports CONGESTED. `att_protocol.c` calls it "ATT congested, message accepted", and `gatt_act_write` ends the operation with that status. An early version of the writer treated 143 as a failure and aborted a healthy transfer 4 KB in, after START had already erased the app. The writer now counts 143 as sent and holds off for 100 ms. The receipt byte-count check still catches any real loss.
+
 ## What fixed it
 
 **Pacing by proxy acknowledgements.** The proxy answers *every* write, including write-without-response, with a `BluetoothGATTWriteResponse` or `BluetoothGATTErrorResponse`. aioesphomeapi just doesn't wait for it on a no-response write. Counting those replies gives real flow control:

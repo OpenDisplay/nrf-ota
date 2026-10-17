@@ -123,6 +123,20 @@ async def test_writer_raises_on_proxy_error_response() -> None:
         await writer.write(b"b")
 
 
+async def test_writer_treats_congestion_as_sent_and_backs_off() -> None:
+    """ESP_GATT_CONGESTED (0x8F) on a no-response write means sent, slow down."""
+    conn = FakeConnection(auto_ack=False)
+    writer = AckedPacketWriter(make_api(conn), ADDRESS, HANDLE, window=1)
+    await writer.write(b"a")
+    conn.reply(BluetoothGATTErrorResponse(address=ADDRESS, handle=HANDLE, error=0x8F))
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await writer.write(b"b")  # no error raised: the packet counts as sent
+    assert loop.time() - t0 >= esphome_proxy._CONGESTION_BACKOFF * 0.9
+    assert writer.congested == 1
+    assert len(conn.sent) == 2
+
+
 async def test_writer_close_stops_listening() -> None:
     conn = FakeConnection()
     writer = AckedPacketWriter(make_api(conn), ADDRESS, HANDLE)

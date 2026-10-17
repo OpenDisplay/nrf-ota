@@ -49,6 +49,14 @@ ACTIVATE_SETTLE = 2.0
 _CONNECTION_PARAMS_SETTING = 1 << 7
 _ACK_TIMEOUT = 10.0
 _PROBE_TIMEOUT = 5.0
+# ESP_GATT_CONGESTED. For a write-without-response, ESP-IDF's Bluedroid hands the
+# packet to L2CAP and *then* reports CONGESTED ("ATT congested, message accepted",
+# att_protocol.c; gatt_act_write ends the op with that status). So the packet was
+# sent; the stack is asking us to slow down. Another connection on the same proxy
+# (e.g. a second tag) is enough to trigger it.
+_GATT_CONGESTED = 0x8F
+#: Seconds to hold off sending after a congestion report.
+_CONGESTION_BACKOFF = 0.1
 
 
 class AckedPacketWriter:
@@ -71,6 +79,9 @@ class AckedPacketWriter:
         self._idle = asyncio.Event()
         self._idle.set()
         self._error: int | None = None
+        #: Packets the proxy reported as sent-but-congested (see _GATT_CONGESTED).
+        self.congested = 0
+        self._resume_at = 0.0
         self._remove = self._connection.add_message_callback(
             self._on_message, (BluetoothGATTWriteResponse, BluetoothGATTErrorResponse)
         )
@@ -79,8 +90,12 @@ class AckedPacketWriter:
         if msg.address != self._address or msg.handle != self._handle or self._outstanding == 0:
             return
         self._outstanding -= 1
-        if isinstance(msg, self._error_type) and self._error is None:
-            self._error = msg.error
+        if isinstance(msg, self._error_type):
+            if msg.error == _GATT_CONGESTED:
+                self.congested += 1
+                self._resume_at = asyncio.get_running_loop().time() + _CONGESTION_BACKOFF
+            elif self._error is None:
+                self._error = msg.error
         self._slots.release()
         if self._outstanding == 0:
             self._idle.set()
@@ -97,6 +112,8 @@ class AckedPacketWriter:
         except asyncio.TimeoutError:
             raise DFUError(f"Bluetooth proxy stopped acknowledging DFU packets for {_ACK_TIMEOUT:.0f}s") from None
         self._raise_if_failed()
+        if (wait := self._resume_at - asyncio.get_running_loop().time()) > 0:
+            await asyncio.sleep(wait)
         self._outstanding += 1
         self._idle.clear()
         self._connection.send_message(
@@ -219,6 +236,8 @@ async def proxy_safe_dfu(
         await dfu.send_firmware(info.firmware, packets_per_notification=PROXY_PRN)
     finally:
         writer.close()
+        if writer.congested:
+            log(f"Bluetooth proxy reported congestion on {writer.congested} packet(s); backed off each time")
 
     # The bootloader keeps the validated image (WAIT_4_ACTIVATE) across a host
     # disconnect and advertises again.
