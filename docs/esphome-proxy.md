@@ -50,6 +50,8 @@ The library uses **2 writes in flight and a receipt every 10 packets**. With 4 i
 | 30 ms interval (with or without reconnect) | 10 / 12 |
 | **Reconnect + 100 ms interval** | **13 / 13** |
 
+The library code (`proxy_safe_dfu`) was then stress-tested through the real Home Assistant Bluetooth stack (habluetooth + bleak-esphome, the bleak classes patched as in HA): **11 / 11** updates committed and booted the expected version, 307–411 s each (median ≈320 s), with no connect retries needed.
+
 The interval matters because the settings flash write runs in radio-idle time, and the proxy's short default interval leaves very little of it. The reconnect's own contribution was never isolated, because all the 100 ms runs also reconnected.
 
 **Refusing unsafe proxies before anything is erased.** `proxy_safe_dfu` requires the proxy's `CONNECTION_PARAMS_SETTING` feature flag. It also sends one probe write to the Packet characteristic before `START` and refuses if the proxy doesn't acknowledge it.
