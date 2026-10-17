@@ -29,6 +29,7 @@ from ._const import (
 )
 from ._zip import DFUZipInfo, _parse_zip_bytes, parse_dfu_zip
 from .dfu import LegacyDFU
+from .esphome_proxy import EsphomeProxyLink, proxy_safe_dfu
 from .scan import (
     _connect_with_retry,
     _resolve_address,
@@ -177,6 +178,19 @@ async def perform_dfu(
         if not dfu_service_present:
             await _safe_disconnect(client)
             raise DFUError("Legacy DFU service not found on device")
+
+        proxy_link = EsphomeProxyLink.from_client(client)
+        if proxy_link is not None:
+            await proxy_safe_dfu(
+                client,
+                proxy_link,
+                info,
+                lambda: _connect_with_retry(dfu_device.address, on_disconnect_cb=lambda _c: None, on_log=log),
+                on_progress=on_progress,
+                on_log=log,
+            )
+            log("DFU complete — device is rebooting with new firmware.")
+            return
 
         dfu = LegacyDFU(client, on_progress=on_progress, on_log=log)
 

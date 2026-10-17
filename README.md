@@ -86,6 +86,8 @@ Scans for nearby named BLE devices and returns a list of `bleak.BLEDevice` objec
 
 Works on Linux, macOS, and Windows via [bleak](https://github.com/hbldh/bleak). On macOS, the default `packets_per_notification` is lowered to 8 (from 10) to stay within CoreBluetooth's write-without-response flow control limits.
 
+Through an ESPHome Bluetooth proxy (Home Assistant), `perform_dfu` switches to a slower, paced path automatically: packets are paced by the proxy's acknowledgements and the image is activated on a fresh, long-interval connection (`packets_per_notification` is fixed at 10 there). It refuses proxies that can't do this safely before anything is erased. If you connect yourself, call `nrf_ota.esphome_proxy.proxy_safe_dfu`. See [docs/esphome-proxy.md](docs/esphome-proxy.md) for why, and the measurements behind it.
+
 ## Development
 
 ```bash

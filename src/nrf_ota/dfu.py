@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import struct
+from typing import Protocol
 
 from bleak import BleakClient
 from bleak.exc import BleakError
@@ -43,6 +44,26 @@ from ._const import (  # noqa: F401
 from ._zip import DFUZipInfo, crc16_ccitt, parse_dfu_zip  # noqa: F401
 
 
+class PacketWriter(Protocol):
+    """Sends DFU Packet characteristic writes (write-without-response)."""
+
+    async def write(self, data: bytes) -> None: ...
+
+    async def drain(self) -> None:
+        """Return once every packet written so far has left the host side."""
+
+
+class _BleakPacketWriter:
+    def __init__(self, client: BleakClient) -> None:
+        self._client = client
+
+    async def write(self, data: bytes) -> None:
+        await self._client.write_gatt_char(LEGACY_DFU_PACKET_UUID, data, response=False)
+
+    async def drain(self) -> None:
+        pass
+
+
 class LegacyDFU:
     """Orchestrates the Nordic Legacy DFU protocol over an active BLE connection.
 
@@ -60,8 +81,10 @@ class LegacyDFU:
         client: BleakClient,
         on_progress: ProgressCallback | None = None,
         on_log: LogCallback | None = None,
+        packet_writer: PacketWriter | None = None,
     ) -> None:
         self.client = client
+        self._packets: PacketWriter = packet_writer or _BleakPacketWriter(client)
         self._on_progress: ProgressCallback = on_progress or (lambda _: None)
         self._on_log: LogCallback = on_log or (lambda _: None)
         self._evt: asyncio.Event = asyncio.Event()
@@ -123,7 +146,8 @@ class LegacyDFU:
             response=True,
         )
         size_packet = struct.pack("<III", 0, 0, image_size)
-        await self.client.write_gatt_char(LEGACY_DFU_PACKET_UUID, size_packet, response=False)
+        await self._packets.write(size_packet)
+        await self._packets.drain()
 
         rsp = await self._wait_for_response()
         if len(rsp) < 3 or rsp[2] not in (RSP_SUCCESS, RSP_INVALID_STATE):
@@ -144,10 +168,11 @@ class LegacyDFU:
         chunk_size = 20
         for i in range(0, len(init_packet), chunk_size):
             chunk = init_packet[i : i + chunk_size]
-            await self.client.write_gatt_char(LEGACY_DFU_PACKET_UUID, chunk, response=False)
+            await self._packets.write(chunk)
             if i + chunk_size < len(init_packet):
                 await asyncio.sleep(0.02)
 
+        await self._packets.drain()
         await asyncio.sleep(0.05)
         await self.client.write_gatt_char(
             LEGACY_DFU_CONTROL_POINT_UUID,
@@ -173,13 +198,11 @@ class LegacyDFU:
                 before expecting a receipt notification.  Higher values are
                 faster but leave less headroom for flow control.
             inter_packet_delay: Seconds to pause after each 20-byte data packet.
-                The DFU Packet characteristic is write-without-response, which has
-                no backpressure over an ESPHome Bluetooth proxy: bursting packets
-                overruns the proxy and they are silently dropped, so the bootloader
-                never reaches the next receipt and the transfer stalls. A small
-                delay (e.g. ``0.02``) paces the writes to roughly one per
-                connection interval, mirroring :meth:`init_dfu`. Leave ``0.0`` on a
-                direct connection, which has proper flow control.
+                Leave ``0.0`` on a direct connection, which has proper flow
+                control, and when a ``packet_writer`` already paces the writes.
+                Through an ESPHome Bluetooth proxy use
+                :func:`nrf_ota.esphome_proxy.proxy_safe_dfu` instead: no fixed
+                delay is reliable there.
         """
         self._on_log(f"Sending firmware ({len(firmware):,} bytes)…")
         self._evt.clear()
@@ -204,7 +227,7 @@ class LegacyDFU:
 
         for i in range(0, total, chunk_size):
             chunk = firmware[i : i + chunk_size]
-            await self.client.write_gatt_char(LEGACY_DFU_PACKET_UUID, chunk, response=False)
+            await self._packets.write(chunk)
             sent += len(chunk)
             packet_count += 1
 
@@ -241,6 +264,7 @@ class LegacyDFU:
             self._on_progress(sent / total * 100)
 
         # Await the final transfer-complete notification from the bootloader
+        await self._packets.drain()
         rsp = await self._wait_for_response()
 
         if len(rsp) < 3:
